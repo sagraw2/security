@@ -868,6 +868,54 @@ Cleanup:
 }
 
 UINT32
+ExtendPcr(int index)
+{
+	DEFINE_CALL_BUFFERS;
+	UINT32 result = TPM_RC_SUCCESS;
+	PCR_Extend_In* pPCR_Extend_In = NULL;
+	PCR_Extend_Out* pPCR_Extend_Out = NULL;
+
+	ALLOCATEOBJECTMEMORY(PCR_Extend_In, pPCR_Extend_In);
+	ALLOCATEOBJECTMEMORY(PCR_Extend_Out, pPCR_Extend_Out);
+
+	// Create the session
+	sessionTable[0].handle = TPM_RS_PW;
+
+	// Extend the debug PCR
+	INITIALIZE_CALL_BUFFERS(TPM2_PCR_Extend, pPCR_Extend_In, pPCR_Extend_Out);
+	parms.objectTableIn[TPM2_PCR_Extend_HdlIn_PcrHandle].generic.handle = index;
+	pPCR_Extend_In->digests.count = 1;
+	pPCR_Extend_In->digests.digests[0].hashAlg = TPM_ALG_SHA1;
+	MemorySet(pPCR_Extend_In->digests.digests[0].digest.sha1, 0x00, sizeof(pPCR_Extend_In->digests.digests[0].digest.sha1));
+	EXECUTE_TPM_CALL(FALSE, TPM2_PCR_Extend);
+	wprintf(L"SHA1 - OK.\n");
+
+	INITIALIZE_CALL_BUFFERS(TPM2_PCR_Extend, pPCR_Extend_In, pPCR_Extend_Out);
+	parms.objectTableIn[TPM2_PCR_Extend_HdlIn_PcrHandle].generic.handle = index;
+	pPCR_Extend_In->digests.count = 1;
+	pPCR_Extend_In->digests.digests[0].hashAlg = TPM_ALG_SHA256;
+	MemorySet(pPCR_Extend_In->digests.digests[0].digest.sha256, 0x00, sizeof(pPCR_Extend_In->digests.digests[0].digest.sha256));
+	EXECUTE_TPM_CALL(FALSE, TPM2_PCR_Extend);
+	wprintf(L"SHA256 - OK.\n");
+
+Cleanup:
+	if (result != TPM_RC_SUCCESS)
+	{
+		wprintf(L"FAILED: 0x%08x\n", result);
+		wprintf(L"Cmd:");
+		for (UINT32 n = 0; n < cbCmd; n++)
+			wprintf(L"%02x ", pbCmd[n]);
+		wprintf(L"\nRsp:");
+		for (UINT32 n = 0; n < cbRsp; n++)
+			wprintf(L"%02x ", pbRsp[n]);
+		wprintf(L"\n");
+	}
+	FREEOBJECTMEMORY(pPCR_Extend_In);
+	FREEOBJECTMEMORY(pPCR_Extend_Out);
+	return result;
+}
+
+UINT32
 ReadClock()
 {
     DEFINE_CALL_BUFFERS;
@@ -1345,6 +1393,52 @@ PhysicalPresenceInterfaceClear()
 Cleanup:
     return result;
 }
+
+
+UINT32
+PhysicalPresencePCRAllocate(uint32_t pcr)
+{
+	BYTE ppiBuffer[256] = { 0 };
+	UINT32 ppiBufferSize = sizeof(ppiBuffer);
+	TBS_RESULT result = TBS_SUCCESS;
+	PUINT32 pInts = (PUINT32)ppiBuffer;
+	BOOL cancelOp = false;
+
+	wprintf(L"Executing PhysicalPresencePCRAllocate\n");
+
+	// Look at PPI
+	memset(ppiBuffer, sizeof(ppiBuffer), 0x00);
+	pInts[0] = 0x00000001;
+	if ((result = Tbsi_Physical_Presence_Command(g_hTbs, ppiBuffer, sizeof(DWORD), ppiBuffer, &ppiBufferSize)) != TBS_SUCCESS)
+	{
+		wprintf(L"Tbsi_Physical_Presence_Command failed with 0x%08x.\n", result);
+		goto Cleanup;
+	}
+	printf("PPI Version %s available.\n", ppiBuffer);
+
+	// ScheduleOp
+	memset(ppiBuffer, sizeof(ppiBuffer), 0x00);
+	ppiBufferSize = sizeof(ppiBuffer);	
+	pInts[0] = 7;
+
+	pInts[1] = 23;
+	pInts[2] = pcr;
+	printf("Request operation 23 (PCR Allocate).\n");
+
+	if ((result = Tbsi_Physical_Presence_Command(g_hTbs, ppiBuffer, sizeof(DWORD) * 3, ppiBuffer, &ppiBufferSize)) != TBS_SUCCESS)
+	{
+		wprintf(L"ERROR: Tbsi_Physical_Presence_Command returned 0x%08x and FW returned 0x%08x.\n", result, pInts[0]);
+		goto Cleanup;
+	}
+	else
+	{
+		wprintf(L"SUCCESS : Tbsi_Physical_Presence_Command returned 0x%08x and FW returned 0x%08x.\n", result, pInts[0]);
+	}
+
+Cleanup:
+	return result;
+}
+
 
 UINT32
 TestAES128Key()
@@ -2072,6 +2166,7 @@ GetHelp(
     wprintf(L" -CPP  - Clear with Physical Presence Interface\n");
     wprintf(L" -RPR  - Read Platform Configuration Registers\n");
     wprintf(L" -EDP  - Extend debug PCR\n");
+	wprintf(L" -EPX  - Extend PCR. PCR index should be 3rd argument. \n");
     wprintf(L" -RDP  - Reset debug PCR\n");
     wprintf(L" -RCl  - Read Clock\n");
     wprintf(L" -TAK  - Test AES 128bit Key\n");
@@ -2079,6 +2174,8 @@ GetHelp(
     wprintf(L" -THK  - Test HMAC Key\n");
     wprintf(L" -TRK  - Test RSA 2048bit Key\n");
     wprintf(L" -CNG  - Test PCPKSP key creation and usage\n");
+	wprintf(L" -PR1  - Allocate SHA1 Platform Configuration Registers bank\n");
+	wprintf(L" -PR2  - Allocate SHA256 Platform Configuration Registers bank\n");
     wprintf(L"\nSwitch:\n");
     wprintf(L" -BoE  - Break into the debugger on entry\n");
 }
@@ -2291,6 +2388,14 @@ __in_ecount(argc) LPCWSTR argv[]
     {
         hr = PhysicalPresenceInterfaceClear();
     }
+	else if (!_wcsicmp(command, L"-pr1"))
+	{
+		hr = PhysicalPresencePCRAllocate(0x00000001);
+	}
+	else if (!_wcsicmp(command, L"-pr2"))
+	{
+		hr = PhysicalPresencePCRAllocate(0x00000002);
+	}
     else if (!_wcsicmp(command, L"-rpr"))
     {
         hr = ReadPcrs();
@@ -2299,6 +2404,10 @@ __in_ecount(argc) LPCWSTR argv[]
     {
         hr = ExtendDebugPcr();
     }
+	else if (!_wcsicmp(command, L"-epx"))
+	{
+		hr = ExtendPcr(_wtoi(argv[2]));
+	}
     else if (!_wcsicmp(command, L"-rdp"))
     {
         hr = ResetDebugPcr();
